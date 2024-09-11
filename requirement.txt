@@ -1,0 +1,3 @@
+ytmusicapi
+httpx
+yt_dlp
