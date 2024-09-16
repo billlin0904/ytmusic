@@ -7,18 +7,13 @@ import yt_dlp
 import base64
 from ytmusicapi import YTMusic
 from fastapi.middleware.gzip import GZipMiddleware
+from models import *
 
 app = FastAPI()
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 初始化 YTMusic API
 ytmusic = YTMusic("oauth.json")
-
-class SongRequest(BaseModel):
-    video_id: str
-    
-class PlaylistRequest(BaseModel):
-    playlist_id: str
 
 def make_ytmusic_url(video_id):
     return f"https://music.youtube.com/watch?v={video_id}"
@@ -77,7 +72,7 @@ async def fetch_song_info_endpoint(request: SongRequest):
     print("Extracting video information...")
 
     # 使用 yt_dlp 取得影片資訊並找出最佳音訊格式
-    best_format = extract_video_info(video_id)
+    best_format = extract_video_info(ytmusic_url)
     download_url = best_format["url"]
     print(f"Download URL: {download_url}")
 
@@ -177,6 +172,120 @@ async def fetch_lyrics(request: SongRequest):
         lyrics = lyrics_data.get("lyrics", "Lyrics not available")
 
         return {"video_id": video_id, "lyrics": lyrics}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/edit_playlist")
+async def edit_playlist(request: EditPlaylistRequest):
+    playlist_id = request.playlist_id
+    new_title = request.new_title
+    try:
+        # 使用 edit_playlist 方法更改播放清單的名稱
+        response = ytmusic.edit_playlist(playlist_id, title=new_title)
+
+        # 檢查回應，確認是否更新成功
+        if response is None:
+            raise HTTPException(status_code=500, detail="Failed to edit playlist title.")
+
+        return {
+            "message": f"Playlist title updated successfully to {new_title}",
+            "playlistId": playlist_id
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/delete_playlist")
+async def delete_playlist(request: DeletePlaylistRequest):
+    playlist_id = request.playlist_id
+    try:
+        # 使用 delete_playlist 刪除指定播放清單
+        response = ytmusic.delete_playlist(playlist_id)
+
+        # 檢查回應，確認是否刪除成功
+        if response is None:
+            raise HTTPException(status_code=500, detail="Failed to delete playlist.")
+
+        return {
+            "message": f"Playlist with ID {playlist_id} deleted successfully."
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
+@app.post("/create_playlist")
+async def create_playlist(request: CreatePlaylistRequest):
+    try:
+        # 使用 create_playlist 方法建立新的播放清單
+        response = ytmusic.create_playlist(
+            title=request.title,
+            description=request.description,
+            privacy_status="PRIVATE" if request.private else "PUBLIC",
+            video_ids=request.video_ids,
+            source_playlist=request.source_playlist
+        )
+
+        # 檢查回應，確認是否建立成功
+        if not response:
+            raise HTTPException(status_code=500, detail="Failed to create playlist.")
+
+        return {
+            "message": "Playlist created successfully.",
+            "playlistId": response
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/search_suggestions")
+async def search_suggestions(request: SearchSuggestionsRequest):
+    try:
+        # 使用 get_search_suggestions 獲取搜索建議
+        suggestions = ytmusic.get_search_suggestions(request.query)
+
+        # 檢查是否有返回結果
+        if not suggestions:
+            raise HTTPException(status_code=404, detail="No search suggestions found.")
+
+        return {
+            "query": request.query,
+            "suggestions": suggestions
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/search_album")
+async def search_album(request: SearchAlbumRequest):
+    try:
+        # 使用 search 並將 filter 設置為 albums 來搜索專輯
+        search_results = ytmusic.search(request.query, filter="albums")
+
+        # 檢查是否有返回結果
+        if not search_results:
+            raise HTTPException(status_code=404, detail="No albums found.")
+
+        return {
+            "query": request.query,
+            "albums": search_results
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))    
+
+@app.post("/get_album")
+async def get_album(request: GetAlbumRequest):
+    try:
+        # 使用 get_album 獲取專輯的詳細資訊
+        album_details = ytmusic.get_album(request.browse_id)
+
+        # 檢查是否有返回結果
+        if not album_details:
+            raise HTTPException(status_code=404, detail="No album details found.")
+
+        return album_details
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
