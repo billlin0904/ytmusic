@@ -8,12 +8,54 @@ import base64
 from ytmusicapi import YTMusic
 from fastapi.middleware.gzip import GZipMiddleware
 from models import *
+from databases import Database
+import sqlalchemy
 
-app = FastAPI()
+# 定義 lifespan 事件處理器
+async def lifespan(app: FastAPI):
+    await database.connect()
+    yield
+    await database.disconnect()
+    
+app = FastAPI(lifespan = lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 初始化 YTMusic API
 ytmusic = YTMusic("oauth.json")
+
+# 定義數據庫 URL
+DATABASE_URL = "sqlite:///./cache.db"
+
+# 創建數據庫實例
+database = Database(DATABASE_URL)
+
+# 定義元數據
+metadata = sqlalchemy.MetaData()
+
+# 定義快取表
+cache_table = sqlalchemy.Table(
+    "cache",
+    metadata,
+    sqlalchemy.Column("video_id", sqlalchemy.String, primary_key=True),
+    sqlalchemy.Column("download_url", sqlalchemy.String),
+    sqlalchemy.Column("thumbnail_base64", sqlalchemy.String),
+)
+
+# 創建數據庫引擎
+engine = sqlalchemy.create_engine(
+    DATABASE_URL, connect_args={"check_same_thread": False}
+)
+
+# 創建表
+metadata.create_all(engine)
+
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
 
 def make_ytmusic_url(video_id):
     return f"https://music.youtube.com/watch?v={video_id}"
@@ -67,6 +109,17 @@ async def fetch_song_info(video_id):
 @app.post("/fetch_song_info")
 async def fetch_song_info_endpoint(request: SongRequest):
     video_id = request.video_id
+    
+    # 檢查是否存在於快取中
+    query = cache_table.select().where(cache_table.c.video_id == video_id)
+    cached_result = await database.fetch_one(query)
+
+    if cached_result:
+        # 返回快取結果
+        return {
+            "download_url": cached_result["download_url"],
+            "thumbnail_base64": cached_result["thumbnail_base64"]
+        }
 
     ytmusic_url = make_ytmusic_url(video_id)
     print("Extracting video information...")
@@ -94,6 +147,14 @@ async def fetch_song_info_endpoint(request: SongRequest):
         buffered = BytesIO()
         resized_image.save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        
+    # 將結果存入快取
+    query = cache_table.insert().values(
+        video_id=video_id,
+        download_url=download_url,
+        thumbnail_base64=base64_image
+    )
+    await database.execute(query)
 
     return {
         "download_url": download_url,
