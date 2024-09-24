@@ -10,6 +10,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from models import *
 from databases import Database
 import sqlalchemy
+from urllib.parse import urlparse, parse_qs
+import time
 
 # 定義 lifespan 事件處理器
 async def lifespan(app: FastAPI):
@@ -39,6 +41,7 @@ cache_table = sqlalchemy.Table(
     sqlalchemy.Column("video_id", sqlalchemy.String, primary_key=True),
     sqlalchemy.Column("download_url", sqlalchemy.String),
     sqlalchemy.Column("thumbnail_base64", sqlalchemy.String),
+    sqlalchemy.Column("expire", sqlalchemy.Integer),  # Unix 时间戳
 )
 
 # 創建數據庫引擎
@@ -48,14 +51,6 @@ engine = sqlalchemy.create_engine(
 
 # 創建表
 metadata.create_all(engine)
-
-@app.on_event("startup")
-async def startup():
-    await database.connect()
-
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
 
 def make_ytmusic_url(video_id):
     return f"https://music.youtube.com/watch?v={video_id}"
@@ -94,7 +89,7 @@ def extract_video_info(video_id):
     
     return best_format
 
-async def fetch_song_info(video_id):
+async def fetch_song_info_from_api(video_id):
     # 使用 ytmusicapi 取得歌曲詳細資訊
     song_info = ytmusic.get_song(video_id)
     if not song_info or 'videoDetails' not in song_info:
@@ -109,50 +104,67 @@ async def fetch_song_info(video_id):
 @app.post("/fetch_song_info")
 async def fetch_song_info_endpoint(request: SongRequest):
     video_id = request.video_id
-    
-    # 檢查是否存在於快取中
+
+    # 检查是否存在于缓存中
     query = cache_table.select().where(cache_table.c.video_id == video_id)
     cached_result = await database.fetch_one(query)
 
     if cached_result:
-        # 返回快取結果
-        return {
-            "download_url": cached_result["download_url"],
-            "thumbnail_base64": cached_result["thumbnail_base64"]
-        }
+        # 检查下载链接是否过期
+        expire_timestamp = cached_result["expire"]
+        current_timestamp = int(time.time())
+        if expire_timestamp > current_timestamp:
+            # 链接仍然有效，返回缓存结果
+            return {
+                "download_url": cached_result["download_url"],
+                "thumbnail_base64": cached_result["thumbnail_base64"]
+            }
+        else:
+            print("Cached URL has expired, fetching new URL...")
 
     ytmusic_url = make_ytmusic_url(video_id)
     print("Extracting video information...")
 
-    # 使用 yt_dlp 取得影片資訊並找出最佳音訊格式
+    # 使用 yt_dlp 获取视频信息并找出最佳音频格式
     best_format = extract_video_info(ytmusic_url)
     download_url = best_format["url"]
     print(f"Download URL: {download_url}")
 
-    # 使用 ytmusicapi 取得歌曲資訊
-    thumbnails = await fetch_song_info(video_id)
+    # 从 download_url 中提取 'expire' 参数
+    parsed_url = urlparse(download_url)
+    query_params = parse_qs(parsed_url.query)
+    expire_param = query_params.get('expire', [None])[0]
+    if expire_param is not None:
+        expire_timestamp = int(expire_param)
+    else:
+        # 如果没有 'expire' 参数，设置一个默认的过期时间（例如1小时后）
+        expire_timestamp = int(time.time()) + 3600  # 1小时后过期
+
+    # 使用 ytmusicapi 获取歌曲信息
+    thumbnails = await fetch_song_info_from_api(video_id)
     thumbnail_url = thumbnails[-1]["url"]
     print(f"Extracting song thumbnail from: {thumbnail_url}")
 
-    # 下載並處理圖片
+    # 下载并处理图片
     async with httpx.AsyncClient() as client:
         response = await client.get(thumbnail_url)
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="Failed to download song thumbnail.")
         
         image = Image.open(BytesIO(response.content))
-        resized_image = image.resize((200, 200))  # 假設縮放到 200x200
+        resized_image = image.resize((200, 200))  # 假设缩放到 200x200
 
-        # 將圖片編碼為 Base64
+        # 将图片编码为 Base64
         buffered = BytesIO()
         resized_image.save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-        
-    # 將結果存入快取
-    query = cache_table.insert().values(
+
+    # 将结果存入缓存，使用 OR REPLACE 进行更新或插入
+    query = cache_table.insert().prefix_with('OR REPLACE').values(
         video_id=video_id,
         download_url=download_url,
-        thumbnail_base64=base64_image
+        thumbnail_base64=base64_image,
+        expire=expire_timestamp
     )
     await database.execute(query)
 
