@@ -1,17 +1,24 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import httpx
+import os
 from PIL import Image
 from io import BytesIO
 import yt_dlp
 import base64
-from ytmusicapi import YTMusic
+from ytmusicapi import YTMusic, OAuthCredentials
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from models import *
 from databases import Database
 import sqlalchemy
 from urllib.parse import urlparse, parse_qs
 import time
+
+# 定義數據庫 URL
+DATABASE_URL = "sqlite:///./cache.db"
+HOST_ADDR = "127.0.0.1:8090"
+PO_TOKEN_VALUE = os.getenv("PO_TOKEN_VALUE")
 
 # 定義 lifespan 事件處理器
 async def lifespan(app: FastAPI):
@@ -23,10 +30,8 @@ app = FastAPI(lifespan = lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 初始化 YTMusic API
-ytmusic = YTMusic("oauth.json")
-
-# 定義數據庫 URL
-DATABASE_URL = "sqlite:///./cache.db"
+ytmusic = YTMusic("browser.json")
+# ytmusic = YTMusic()
 
 # 創建數據庫實例
 database = Database(DATABASE_URL)
@@ -42,8 +47,13 @@ cache_table = sqlalchemy.Table(
     sqlalchemy.Column("download_url", sqlalchemy.String),
     sqlalchemy.Column("thumbnail_base64", sqlalchemy.String),
     sqlalchemy.Column("expire", sqlalchemy.Integer),  # Unix 时间戳
+    sqlalchemy.Column("lyrics", sqlalchemy.Text),  # 新增 lyrics 欄位來存放歌詞
 )
 
+DOWNLOAD_FOLDER = "downloaded_songs"
+if not os.path.exists(DOWNLOAD_FOLDER):
+    os.makedirs(DOWNLOAD_FOLDER)
+    
 # 創建數據庫引擎
 engine = sqlalchemy.create_engine(
     DATABASE_URL, connect_args={"check_same_thread": False}
@@ -55,123 +65,173 @@ metadata.create_all(engine)
 def make_ytmusic_url(video_id):
     return f"https://music.youtube.com/watch?v={video_id}"
 
-def find_best_audio_format(formats):
-    # 定義最佳音訊編碼
-    kBestAudioCodec = "mp4"
-
-    # 過濾出符合條件的格式：沒有視頻編碼，音訊編碼存在且包含指定的編碼
-    valid_formats = [format for format in formats if format['vcodec'] == 'none' and 'acodec' in format and kBestAudioCodec in format['acodec']]
-
-    # 如果沒有找到符合條件的格式，回傳 None
-    if not valid_formats:
-        return None
-
-    # 按照音訊比特率排序，並返回比特率最高的格式
-    best_format = sorted(valid_formats, key=lambda f: f['abr'], reverse=True)[0]
-    print(f"{best_format}")
-    return best_format
-
-def extract_video_info(video_id):
-    ydl_opts = {
-        'cookiesfrombrowser': ('firefox', None, None, None),
-        'format': 'bestaudio/best',  # 取得最好的音訊格式
-        'noplaylist': True,          # 不要下載播放清單中的其他內容
-        'extract_flat': False,       # 完整提取格式資訊
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(video_id, download=False)
-
-    # 找到最佳音訊格式
-    best_format = find_best_audio_format(info['formats'])
-    if best_format is None:
-        raise HTTPException(status_code=404, detail="No suitable audio format found.")
-    
-    return best_format
-
-async def fetch_song_info_from_api(video_id):
-    # 使用 ytmusicapi 取得歌曲詳細資訊
-    song_info = ytmusic.get_song(video_id)
-    if not song_info or 'videoDetails' not in song_info:
-        raise HTTPException(status_code=404, detail="Song information not found.")
-    
-    thumbnails = song_info['videoDetails'].get('thumbnail', {}).get('thumbnails', [])
-    if not thumbnails:
-        raise HTTPException(status_code=404, detail="Song thumbnail not found.")
-    
-    return thumbnails
-
-@app.post("/fetch_song_info")
-async def fetch_song_info_endpoint(request: SongRequest):
+@app.post("/fetch_song")
+async def fetch_song(request: SongRequest):
+    """
+    與 /fetch_song_info 類似，但下載最佳音質檔案並轉成 .m4a 存到本地端。
+    回傳的 download_url 是本地端可直接下載的連結，例如：
+      http://127.0.0.1:8090/download_song/{video_id}.m4a
+    """
     video_id = request.video_id
 
-    # 检查是否存在于缓存中
+    # --------------------------
+    # 1) 先檢查快取資料(可自行複用 /fetch_song_info 的邏輯)
+    # --------------------------
     query = cache_table.select().where(cache_table.c.video_id == video_id)
     cached_result = await database.fetch_one(query)
 
-    if cached_result:
-        # 检查下载链接是否过期
-        expire_timestamp = cached_result["expire"]
-        current_timestamp = int(time.time())
-        if expire_timestamp > current_timestamp:
-            # 链接仍然有效，返回缓存结果
+    # 若快取已存在且未過期（檢查 expire 時間），就直接用
+    if cached_result and cached_result["expire"] > int(time.time()):
+        # 同時也檢查本地是否已經有下載好的檔案
+        file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.opus")
+        if os.path.exists(file_path):
             return {
-                "download_url": cached_result["download_url"],
-                "thumbnail_base64": cached_result["thumbnail_base64"]
+                "download_url": f"http://127.0.0.1:8090/download_song/{video_id}.opus",
+                "thumbnail_base64": cached_result["thumbnail_base64"],
+                "lyrics": cached_result["lyrics"]
             }
         else:
-            print("Cached URL has expired, fetching new URL...")
+            print("快取資訊存在，但檔案不在本地端，需重新下載。")
+
+    # --------------------------
+    # 2) 抓取歌曲資訊 (與原本的 fetch_song_info 類似)
+    # --------------------------
+    # 先組成可下載的 YouTube Music URL
+    def make_ytmusic_url(vid):
+        return f"https://music.youtube.com/watch?v={vid}"
 
     ytmusic_url = make_ytmusic_url(video_id)
-    print("Extracting video information...")
+    
+    # 透過 yt_dlp 抓取格式資訊
+    ydl_extract_opts = {
+        #'cookiesfrombrowser': ('firefox', None, None, None),
+        'extractor_args': {
+            'youtube': {
+                'po_token': [PO_TOKEN_VALUE]
+            }
+        },
+        'cookiefile': 'cookies.txt',
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+    }
 
-    # 使用 yt_dlp 获取视频信息并找出最佳音频格式
-    best_format = extract_video_info(ytmusic_url)
+    with yt_dlp.YoutubeDL(ydl_extract_opts) as ydl:
+        info = ydl.extract_info(ytmusic_url, download=False)
+
+    # 從 formats 中找最佳音訊
+    best_format = None
+    for f in info['formats']:
+        if f.get('vcodec') == 'none' and 'acodec' in f and 'mp4' in f['acodec']:
+            # 這裡簡單取碼率最高即可
+            if (best_format is None) or (f.get('abr', 0) > best_format.get('abr', 0)):
+                best_format = f
+
+    if not best_format:
+        raise HTTPException(status_code=404, detail="No suitable audio format found.")
+
+    # 取得下載連結及到期時間
     download_url = best_format["url"]
-    print(f"Download URL: {download_url}")
-
-    # 从 download_url 中提取 'expire' 参数
     parsed_url = urlparse(download_url)
     query_params = parse_qs(parsed_url.query)
     expire_param = query_params.get('expire', [None])[0]
     if expire_param is not None:
         expire_timestamp = int(expire_param)
     else:
-        # 如果没有 'expire' 参数，设置一个默认的过期时间（例如1小时后）
-        expire_timestamp = int(time.time()) + 3600  # 1小时后过期
+        # 如果沒有 expire 參數，就預設 1 小時後
+        expire_timestamp = int(time.time()) + 3600
 
-    # 使用 ytmusicapi 获取歌曲信息
-    thumbnails = await fetch_song_info_from_api(video_id)
+    # 抓取歌曲詳細資訊(縮圖、歌詞)
+    song_info = ytmusic.get_song(video_id)
+    if not song_info or 'videoDetails' not in song_info:
+        raise HTTPException(status_code=404, detail="Song information not found.")
+
+    thumbnails = song_info['videoDetails'].get('thumbnail', {}).get('thumbnails', [])
+    if not thumbnails:
+        raise HTTPException(status_code=404, detail="Song thumbnail not found.")
+
     thumbnail_url = thumbnails[-1]["url"]
-    print(f"Extracting song thumbnail from: {thumbnail_url}")
 
-    # 下载并处理图片
+    # 抓取歌詞 (若有 lyrics_id)
+    watch_playlist = ytmusic.get_watch_playlist(video_id)
+    lyrics = ""
+    if "lyrics" in watch_playlist and watch_playlist["lyrics"]:
+        lyrics_id = watch_playlist["lyrics"]
+        lyrics_data = ytmusic.get_lyrics(lyrics_id)
+        lyrics = lyrics_data.get("lyrics", "Lyrics not available")
+
+    # 下載縮圖並轉成 base64
     async with httpx.AsyncClient() as client:
         response = await client.get(thumbnail_url)
         if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to download song thumbnail.")
-        
+            raise HTTPException(status_code=500, detail="Failed to download thumbnail.")
         image = Image.open(BytesIO(response.content))
-        resized_image = image.resize((200, 200))  # 假设缩放到 200x200
-
-        # 将图片编码为 Base64
+        resized_image = image.resize((200, 200))
         buffered = BytesIO()
         resized_image.save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    # 将结果存入缓存，使用 OR REPLACE 进行更新或插入
-    query = cache_table.insert().prefix_with('OR REPLACE').values(
+    # --------------------------
+    # 3) 下載音訊檔並轉成 .m4a 檔
+    # --------------------------
+    file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.opus")
+
+    # 若本地已有同名檔案，可以視需求判斷是否要覆蓋或跳過下載
+    if not os.path.exists(file_path):
+    #if True:
+        ydl_opts = {
+            'extractor_args': {
+                'youtube': {
+                    'po_token': [PO_TOKEN_VALUE]
+                }
+            },
+            'cookiefile': 'cookies.txt',          
+            # 將檔案直接輸出到 file_path
+            'outtmpl': file_path.replace('.opus', '.%(ext)s'),
+            'format': 'bestaudio/best',
+            'postprocessors': [
+                {
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'best' # 最高音質就是opus格式
+                }
+            ]
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([ytmusic_url])
+
+        # 下載完成後，您就會在 downloaded_songs/ 下看到 {video_id}.opus
+
+    # --------------------------
+    # 4) 寫入/更新快取
+    # --------------------------
+    insert_query = cache_table.insert().prefix_with('OR REPLACE').values(
         video_id=video_id,
         download_url=download_url,
         thumbnail_base64=base64_image,
-        expire=expire_timestamp
+        expire=expire_timestamp,
+        lyrics=lyrics
     )
-    await database.execute(query)
+    await database.execute(insert_query)
 
+    # --------------------------
+    # 5) 回傳結果
+    # --------------------------
     return {
-        "download_url": download_url,
-        "thumbnail_base64": base64_image
+        "download_url": f"http://{HOST_ADDR}/download_song/{video_id}.opus",
+        "thumbnail_base64": base64_image,
+        "lyrics": lyrics
     }
+
+@app.get("/download_song/{video_id}.opus")
+async def download_song(video_id: str):
+    file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.opus")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    return FileResponse(
+        path=file_path,
+        media_type="audio/opus",
+        filename=f"{video_id}.opus"
+    )
     
 @app.post("/fetch_playlist")
 async def fetch_playlist(request: PlaylistRequest):
@@ -362,3 +422,44 @@ async def get_album(request: GetAlbumRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/remove_cache")
+async def remove_cache(request: RemoveCacheRequest):
+    video_id = request.video_id
+
+    # 檢查是否存在
+    query = cache_table.select().where(cache_table.c.video_id == video_id)
+    cached_result = await database.fetch_one(query)
+
+    if not cached_result:
+        return {"message": f"No cache found for video_id {video_id}."}
+
+    # 刪除資料庫紀錄
+    delete_query = cache_table.delete().where(cache_table.c.video_id == video_id)
+    await database.execute(delete_query)
+
+    # 刪除本地實體檔案
+    file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.m4a")
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+    return {"message": f"Cache and file for video_id {video_id} removed successfully."}
+
+@app.post("/remove_cache_all")
+async def remove_cache_all():
+    # 刪除所有資料庫快取
+    delete_query = cache_table.delete()
+    await database.execute(delete_query)
+
+    # 刪除所有下載的 .m4a 檔案
+    deleted_files = []
+    for file_name in os.listdir(DOWNLOAD_FOLDER):
+        if file_name.endswith(".opus"):
+            file_path = os.path.join(DOWNLOAD_FOLDER, file_name)
+            os.remove(file_path)
+            deleted_files.append(file_name)
+
+    return {
+        "message": "All cache records and downloaded audio files removed.",
+        "files_deleted": deleted_files
+    }

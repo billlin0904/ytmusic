@@ -29,3 +29,6 @@ class SearchAlbumRequest(BaseModel):
     
 class GetAlbumRequest(BaseModel):
     browse_id: str
+    
+class RemoveCacheRequest(BaseModel):
+    video_id: str
