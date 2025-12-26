@@ -1,0 +1,5 @@
+ytmusicapi
+httpx
+curl-cffi
+yt_dlp
+yt-dlp-ejs

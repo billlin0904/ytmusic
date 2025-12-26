@@ -32,3 +32,6 @@ class GetAlbumRequest(BaseModel):
     
 class RemoveCacheRequest(BaseModel):
     video_id: str
+    
+class ArtistRequest(BaseModel):
+    channel_id: str

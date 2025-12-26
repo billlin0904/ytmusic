@@ -1,0 +1,22 @@
+{
+    "accept": "*/*",
+    "accept-encoding": "gzip, deflate",
+    "accept-language": "zh-TW,zh;q=0.8,en-US;q=0.5,en;q=0.3",
+    "alt-used": "music.youtube.com",
+    "authorization": "SAPISIDHASH 1763402844_8b7574c708682c387aa37810e95dfd8284e7db96_u SAPISID1PHASH 1763402844_8b7574c708682c387aa37810e95dfd8284e7db96_u SAPISID3PHASH 1763402844_8b7574c708682c387aa37810e95dfd8284e7db96_u",
+    "connection": "keep-alive",
+    "content-encoding": "gzip",
+    "content-type": "application/json",
+    "cookie": "HSID=AwLIOTPslvZxyq_pc; SSID=AWtE9NzB7vbZxTf6Z; APISID=XxRG7Vm5mrStul24/Ai-F09_KFzWRwmfLr; SAPISID=RcT3hVEHhsrVJjak/AgPFuuC_B4Z6nsgzW; __Secure-1PAPISID=RcT3hVEHhsrVJjak/AgPFuuC_B4Z6nsgzW; __Secure-3PAPISID=RcT3hVEHhsrVJjak/AgPFuuC_B4Z6nsgzW; VISITOR_INFO1_LIVE=pwd4nHs-MxU; VISITOR_PRIVACY_METADATA=CgJUVxIEGgAgRQ%3D%3D; LOGIN_INFO=AFmmF2swRAIgReq6V8Z1PJRUErVDO1_8IT9hZRd9bUoojvpPY7yibggCIDYaevopkT01Degq7pS9_iVw2yGl8F0ySdFSWjtMoUcJ:QUQ3MjNmemdkSG5rY0FXNTJfTDA0LVFnNVZUMHdLckU1RWctLUNRUFNsbDJFTU9Tc0RUeU43QmFNV1Y4eTVPYTg4bF9WVkFqek1ES3RHZm9MejE3am1RZGNERUZrZFB2cnZwVWNTRF9RRnlHTEJBNWwtUWlSRDF3c1FxQXFkeHRiZ3RtakJKNFFFc0phVkdUNkZtc1ZheWN3OUNhc28wdm1n; YSC=SoMedUvedq0; wide=1; _gcl_au=1.1.723322826.1762435362; SID=g.a0003Qi8Wq8j7xG7Ymp8ViJxzB99XxJjCAS6hJ2lIaAQiYQu1-yL5gxozskl5eJSojCq68kj8AACgYKAWISARESFQHGX2MigA-NDwghKLjgJQhFfpGzHhoVAUF8yKovbIpp6w0fdEG6RUGesUWl0076; __Secure-1PSID=g.a0003Qi8Wq8j7xG7Ymp8ViJxzB99XxJjCAS6hJ2lIaAQiYQu1-yLx75wv5zSwLEc2hU6vznrbgACgYKAbsSARESFQHGX2MiHYsCe4QivT2ijvtdPR5e5xoVAUF8yKrezzVpG1IiVDQOccjjZTqS0076; __Secure-3PSID=g.a0003Qi8Wq8j7xG7Ymp8ViJxzB99XxJjCAS6hJ2lIaAQiYQu1-yLWwaeMHchRK8FawKfG3XDhQACgYKAQsSARESFQHGX2Mi1d09cyw9-0hF1SGMVoHb4hoVAUF8yKqaZ9FrMFmCus2JD4WJHyQH0076; PREF=f6=40000080&f4=4000000&tz=Asia.Taipei&f7=100&repeat=NONE; __Secure-ROLLOUT_TOKEN=CP_k7tCxmbLU0QEQ16DxgaHCkAMY1cScvMX5kAM%3D; __Secure-1PSIDTS=sidts-CjIBwQ9iI8Vmmwn_IOeohrqUyU85hqfNiAJKdTI9lSqrdptY3wud-9kFQED-RM8DGVnHbxAA; __Secure-3PSIDTS=sidts-CjIBwQ9iI8Vmmwn_IOeohrqUyU85hqfNiAJKdTI9lSqrdptY3wud-9kFQED-RM8DGVnHbxAA; SIDCC=AKEyXzXJYqQZ9As0pLYZ6R4IslRrv-Orlo9xnqya9cP8NJ45onOT6rBkMUEQkpz35VjnFq3lRqM; __Secure-1PSIDCC=AKEyXzVA651g6FPbP4cu5QvWO85fF9U_rk_2gzWEv5wxSsGkjHu126G2eIrUO3TmGzTEesKEPA; __Secure-3PSIDCC=AKEyXzWwl3YzptwFXOxKWeMkhUjyL5KV5biasn3skxue42DaKFbPGt_K2zObGQulvb-nsAXZ7A",
+    "origin": "https://music.youtube.com",
+    "priority": "u=1",
+    "referer": "https://music.youtube.com/watch?v=Z1WtUq41crA&list=RDAMVMZ1WtUq41crA",
+    "te": "trailers",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0",
+    "x-goog-authuser": "0",
+    "x-goog-visitor-id": "Cgtwd2Q0bkhzLU14VSjayO3IBjIKCgJUVxIEGgAgRQ%3D%3D",
+    "x-origin": "https://music.youtube.com",
+    "x-youtube-bootstrap-logged-in": "true",
+    "x-youtube-client-name": "67",
+    "x-youtube-client-version": "1.20251111.09.00"
+}

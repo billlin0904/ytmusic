@@ -3,14 +3,15 @@
     "configurations": [
         {
             "name": "Python: FastAPI",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
             "args": [
                 "main:app",
                 "--port",
-                "8080",
-                "--reload"
+                "8090",
+                "--workers",
+                "1"              
             ],
             "jinja": true,
             "justMyCode": false

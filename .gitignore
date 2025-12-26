@@ -1,1 +1,8 @@
 /__pycache__
+/build
+*.opus
+*.spec
+*.env
+cookies.txt
+main.bat
+main.exe

@@ -4,6 +4,7 @@ import httpx
 import os
 from PIL import Image
 from io import BytesIO
+import uvicorn
 import yt_dlp
 import base64
 from ytmusicapi import YTMusic, OAuthCredentials
@@ -14,11 +15,15 @@ from databases import Database
 import sqlalchemy
 from urllib.parse import urlparse, parse_qs
 import time
+import multiprocessing
+from uvicorn import run
+from tabulate import tabulate
+from yt_dlp.networking.impersonate import ImpersonateTarget
 
 # 定義數據庫 URL
 DATABASE_URL = "sqlite:///./cache.db"
 HOST_ADDR = "127.0.0.1:8090"
-PO_TOKEN_VALUE = os.getenv("PO_TOKEN_VALUE")
+#PO_TOKEN_VALUE = os.getenv("PO_TOKEN_VALUE")
 
 # 定義 lifespan 事件處理器
 async def lifespan(app: FastAPI):
@@ -30,8 +35,10 @@ app = FastAPI(lifespan = lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 初始化 YTMusic API
-ytmusic = YTMusic("browser.json")
-# ytmusic = YTMusic()
+# ytmusic = YTMusic("browser.json", language="ja")
+# ytmusic = YTMusic("browser.json", language="zh_TW")
+# ytmusic = YTMusic(language="ja")
+ytmusic = YTMusic(language="ja")
 
 # 創建數據庫實例
 database = Database(DATABASE_URL)
@@ -62,94 +69,156 @@ engine = sqlalchemy.create_engine(
 # 創建表
 metadata.create_all(engine)
 
-def make_ytmusic_url(video_id):
-    return f"https://music.youtube.com/watch?v={video_id}"
+def make_544xh544_image(url: str) -> str:
+    """
+    將輸入的 url 字串中 
+    'w120-h120-l90-rj' 替換為 'w544-h544-l90-rj'
+    """
+    return url.replace("w120-h120-l90-rj", "w544-h544-l90-rj")
 
 @app.post("/fetch_song")
 async def fetch_song(request: SongRequest):
     """
-    與 /fetch_song_info 類似，但下載最佳音質檔案並轉成 .m4a 存到本地端。
+    與 /fetch_song_info 類似，但下載最佳音質檔案並轉成 .opus 存到本地端。
     回傳的 download_url 是本地端可直接下載的連結，例如：
-      http://127.0.0.1:8090/download_song/{video_id}.m4a
+      http://127.0.0.1:8090/download_song/{video_id}.opus
     """
     video_id = request.video_id
 
     # --------------------------
-    # 1) 先檢查快取資料(可自行複用 /fetch_song_info 的邏輯)
+    # 檔案路徑設定
+    # --------------------------
+    base_path = os.path.join(DOWNLOAD_FOLDER, video_id)
+    opus_path = base_path + ".opus"  # 最終輸出檔案
+
+    # --------------------------
+    # 1) 先檢查快取資料
     # --------------------------
     query = cache_table.select().where(cache_table.c.video_id == video_id)
     cached_result = await database.fetch_one(query)
 
-    # 若快取已存在且未過期（檢查 expire 時間），就直接用
-    if cached_result and cached_result["expire"] > int(time.time()):
-        # 同時也檢查本地是否已經有下載好的檔案
-        file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.opus")
-        if os.path.exists(file_path):
+    now_ts = int(time.time())
+
+    if cached_result and cached_result["expire"] > now_ts:
+        # 快取存在且未過期，再確認本地檔案是否存在
+        if os.path.exists(opus_path):
             return {
-                "download_url": f"http://127.0.0.1:8090/download_song/{video_id}.opus",
+                "download_url": f"http://{HOST_ADDR}/download_song/{video_id}.opus",
                 "thumbnail_base64": cached_result["thumbnail_base64"],
-                "lyrics": cached_result["lyrics"]
+                "lyrics": cached_result["lyrics"],
             }
         else:
-            print("快取資訊存在，但檔案不在本地端，需重新下載。")
+            print("快取資訊存在，但本地 .opus 檔案不存在，需重新下載。")
 
     # --------------------------
-    # 2) 抓取歌曲資訊 (與原本的 fetch_song_info 類似)
+    # 2) 準備 YouTube Music URL
     # --------------------------
-    # 先組成可下載的 YouTube Music URL
-    def make_ytmusic_url(vid):
+    def make_ytmusic_url(vid: str) -> str:
         return f"https://music.youtube.com/watch?v={vid}"
 
     ytmusic_url = make_ytmusic_url(video_id)
-    
-    # 透過 yt_dlp 抓取格式資訊
-    ydl_extract_opts = {
-        #'cookiesfrombrowser': ('firefox', None, None, None),
-        'extractor_args': {
-            'youtube': {
-                'po_token': [PO_TOKEN_VALUE]
-            }
+
+    # --------------------------
+    # 3) 一次性呼叫 YoutubeDL：
+    #    - 下載最佳音質
+    #    - 使用 FFmpegExtractAudio 轉 opus
+    #    - 同時取得 info (formats, metadata, url...)
+    # --------------------------
+    ydl_opts = {
+        "verbose": True,
+        "cookiesfrombrowser": ("firefox",),
+        "concurrent_fragment_downloads": 5,
+        "js_runtimes": {
+            "node": {}
         },
-        'cookiefile': 'cookies.txt',
-        'format': 'bestaudio/best',
-        'noplaylist': True,
+        # 讓 ytdlp 自動選擇最佳音訊格式
+        "format": "bestaudio/best",
+        # 下載檔案的暫時輸出樣板（ffmpeg 轉檔前）
+        "outtmpl": base_path + ".%(ext)s",
+        # 使用 FFmpegExtractAudio 轉成 opus
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "opus",  # 最終輸出 opus
+                "nopostoverwrites": False, # 告訴 FFmpeg 如果來源已經是音訊，直接複製串流，不要重新編碼
+            }
+        ],
+        # 這裡可以視需求加入 extractor_args / cookiefile / impersonate 等
+        "extractor_args": {
+            # 你原本註解掉的各種設定可視情況再加回來
+        },
     }
 
-    with yt_dlp.YoutubeDL(ydl_extract_opts) as ydl:
-        info = ydl.extract_info(ytmusic_url, download=False)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # 只呼叫這一次：完成下載 + 轉檔 + 回傳 metadata
+        info = ydl.extract_info(ytmusic_url, download=True)
 
-    # 從 formats 中找最佳音訊
-    best_format = None
-    for f in info['formats']:
-        if f.get('vcodec') == 'none' and 'acodec' in f and 'mp4' in f['acodec']:
-            # 這裡簡單取碼率最高即可
-            if (best_format is None) or (f.get('abr', 0) > best_format.get('abr', 0)):
-                best_format = f
+    # --------------------------
+    # 4) 檢查最終 .opus 檔案是否存在
+    # --------------------------
+    if not os.path.exists(opus_path):
+        # 理論上不應該發生，除非 ffmpeg/後處理失敗
+        raise HTTPException(status_code=500, detail="Audio file conversion to .opus failed.")
 
-    if not best_format:
-        raise HTTPException(status_code=404, detail="No suitable audio format found.")
+    # --------------------------
+    # 5) (選擇性) 顯示 formats 資訊 for debug
+    # --------------------------
+    table_data = []
+    for f in info.get("formats", []):
+        table_data.append(
+            [
+                f.get("format_id"),
+                f.get("ext"),
+                f.get("acodec"),
+                f.get("vcodec"),
+                f.get("abr"),
+            ]
+        )
+    headers = ["format_id", "ext", "acodec", "vcodec", "abr"]
+    print(tabulate(table_data, headers=headers, tablefmt="pretty"))
 
-    # 取得下載連結及到期時間
-    download_url = best_format["url"]
-    parsed_url = urlparse(download_url)
-    query_params = parse_qs(parsed_url.query)
-    expire_param = query_params.get('expire', [None])[0]
-    if expire_param is not None:
-        expire_timestamp = int(expire_param)
-    else:
-        # 如果沒有 expire 參數，就預設 1 小時後
-        expire_timestamp = int(time.time()) + 3600
+    # --------------------------
+    # 6) 從 info 或 url 抓 expire (當作快取 TTL)
+    # --------------------------
+    # 這裡用 info["url"] 來解析 expire 參數（若有）
+    expire_timestamp = now_ts + 3600  # 預設 1 小時
+    direct_url = info.get("url")
+    if direct_url:
+        parsed_url = urlparse(direct_url)
+        query_params = parse_qs(parsed_url.query)
+        expire_param = query_params.get("expire", [None])[0]
+        if expire_param is not None:
+            try:
+                expire_timestamp = int(expire_param)
+            except ValueError:
+                pass
 
-    # 抓取歌曲詳細資訊(縮圖、歌詞)
+    # --------------------------
+    # 7) 抓取歌曲詳細資訊（縮圖、歌詞）
+    # --------------------------
     song_info = ytmusic.get_song(video_id)
-    if not song_info or 'videoDetails' not in song_info:
+    if not song_info or "videoDetails" not in song_info:
         raise HTTPException(status_code=404, detail="Song information not found.")
 
-    thumbnails = song_info['videoDetails'].get('thumbnail', {}).get('thumbnails', [])
+    video_details = song_info["videoDetails"]
+    thumbnails = video_details.get("thumbnail", {}).get("thumbnails", [])
     if not thumbnails:
         raise HTTPException(status_code=404, detail="Song thumbnail not found.")
 
+    # 取最大張縮圖
     thumbnail_url = thumbnails[-1]["url"]
+    # 你自己的縮圖轉 544x544 的 helper
+    thumbnail_url = make_544xh544_image(thumbnail_url)
+
+    # 下載縮圖並轉成 base64
+    async with httpx.AsyncClient() as client:
+        response = await client.get(thumbnail_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to download thumbnail.")
+        image = Image.open(BytesIO(response.content))
+        buffered = BytesIO()
+        image.save(buffered, format="JPEG")
+        base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     # 抓取歌詞 (若有 lyrics_id)
     watch_playlist = ytmusic.get_watch_playlist(video_id)
@@ -159,68 +228,33 @@ async def fetch_song(request: SongRequest):
         lyrics_data = ytmusic.get_lyrics(lyrics_id)
         lyrics = lyrics_data.get("lyrics", "Lyrics not available")
 
-    # 下載縮圖並轉成 base64
-    async with httpx.AsyncClient() as client:
-        response = await client.get(thumbnail_url)
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to download thumbnail.")
-        image = Image.open(BytesIO(response.content))
-        resized_image = image.resize((200, 200))
-        buffered = BytesIO()
-        resized_image.save(buffered, format="JPEG")
-        base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
     # --------------------------
-    # 3) 下載音訊檔並轉成 .m4a 檔
+    # 8) 寫入/更新快取 (建議這裡直接存本地 download_url)
     # --------------------------
-    file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.opus")
+    local_download_url = f"http://{HOST_ADDR}/download_song/{video_id}.opus"
 
-    # 若本地已有同名檔案，可以視需求判斷是否要覆蓋或跳過下載
-    if not os.path.exists(file_path):
-    #if True:
-        ydl_opts = {
-            'extractor_args': {
-                'youtube': {
-                    'po_token': [PO_TOKEN_VALUE]
-                }
-            },
-            'cookiefile': 'cookies.txt',          
-            # 將檔案直接輸出到 file_path
-            'outtmpl': file_path.replace('.opus', '.%(ext)s'),
-            'format': 'bestaudio/best',
-            'postprocessors': [
-                {
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'best' # 最高音質就是opus格式
-                }
-            ]
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([ytmusic_url])
-
-        # 下載完成後，您就會在 downloaded_songs/ 下看到 {video_id}.opus
-
-    # --------------------------
-    # 4) 寫入/更新快取
-    # --------------------------
-    insert_query = cache_table.insert().prefix_with('OR REPLACE').values(
-        video_id=video_id,
-        download_url=download_url,
-        thumbnail_base64=base64_image,
-        expire=expire_timestamp,
-        lyrics=lyrics
+    insert_query = (
+        cache_table.insert()
+        .prefix_with("OR REPLACE")
+        .values(
+            video_id=video_id,
+            download_url=local_download_url,  # 這裡存本地連結，更直覺
+            thumbnail_base64=base64_image,
+            expire=expire_timestamp,
+            lyrics=lyrics,
+        )
     )
     await database.execute(insert_query)
 
     # --------------------------
-    # 5) 回傳結果
+    # 9) 回傳結果
     # --------------------------
     return {
-        "download_url": f"http://{HOST_ADDR}/download_song/{video_id}.opus",
+        "download_url": local_download_url,
         "thumbnail_base64": base64_image,
-        "lyrics": lyrics
+        "lyrics": lyrics,
     }
-
+    
 @app.get("/download_song/{video_id}.opus")
 async def download_song(video_id: str):
     file_path = os.path.join(DOWNLOAD_FOLDER, f"{video_id}.opus")
@@ -463,3 +497,27 @@ async def remove_cache_all():
         "message": "All cache records and downloaded audio files removed.",
         "files_deleted": deleted_files
     }
+    
+@app.post("/fetch_artist")
+async def fetch_artist(request: ArtistRequest):
+    """
+    根據給定的 channelId (實際上是 YTMusic 的 browseId) 取得藝人資訊。
+    """
+    channel_id = request.channel_id
+    try:
+        # 呼叫 ytmusicapi 中的 get_artist 方法
+        artist_data = ytmusic.get_artist(channel_id)
+
+        # 若 artist_data 為空，表示找不到相關資訊
+        if not artist_data:
+            raise HTTPException(status_code=404, detail="Artist not found.")
+
+        # 可依需求直接回傳完整的 artist_data 或自行過濾需要的欄位
+        return artist_data
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# if __name__ == '__main__':
+#     multiprocessing.freeze_support()  # For Windows support
+#     uvicorn.run(app, host="127.0.0.1", port=8090, reload=False, workers=1)

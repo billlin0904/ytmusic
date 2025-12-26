@@ -1,0 +1,1 @@
+start pyinstaller --collect-all ytmusicapi --collect-all databases.backends --collect-all base main.py
